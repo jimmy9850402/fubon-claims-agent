@@ -69,12 +69,12 @@ def search_supabase(keyword):
         cursor = conn.cursor()
         
         # 搜尋關鍵字 (使用 ilike 進行模糊比對，不分大小寫)
-        # 限制回傳 3 筆，每筆截取部分內容，防止 Token 爆炸
+        # 注意這裡：已經幫大寫欄位加上了 "雙引號" 避免 PostgreSQL 認錯！
         sql_query = """
-            SELECT JFULL 
+            SELECT "JFULL" 
             FROM car_judgments 
-            WHERE JFULL ilike %s 
-            ORDER BY JDATE desc 
+            WHERE "JFULL" ilike %s 
+            ORDER BY "JDATE" desc 
             LIMIT 3
         """
         cursor.execute(sql_query, (f"%{keyword}%",))
