@@ -23,12 +23,12 @@ def evaluate(
     print(f"--- 🚀 收到請求 ---")
     print(f"📍 部位: {body_part} | 薪資: {salary} | 月數: {months} | 肇責: {liability}%")
     
-    # 1. 執行 Supabase 資料庫搜尋 (293MB 大數據)
+    # 1. 執行 Supabase 資料庫搜尋 (支援多關鍵字斷詞)
     judgments = search_supabase(body_part)
     
     data_source = "Database"
     
-    # 2. 備援邏輯：如果資料庫查不到，提供 AI 模擬判斷 (避免回傳空箱子)
+    # 2. 備援邏輯：如果真的連斷詞都查不到，提供 AI 模擬判斷
     if not judgments:
         print("⚠️ 資料庫查無結果，啟動 Web_Search 備援邏輯...")
         data_source = "AI_Internal_Knowledge"
@@ -40,7 +40,6 @@ def evaluate(
 
     # 3. 理賠邏輯精算 (Python 核心計算)
     work_loss = salary * months
-    # 預設建議慰撫金中間值 80000 (可由 AI 在 Copilot 裡根據判例再次動態修正)
     suggested_consolation = 80000 
     
     total_estimated = work_loss + suggested_consolation
@@ -62,22 +61,35 @@ def evaluate(
     }
 
 def search_supabase(keyword):
-    """連線到 Supabase 並執行模糊檢索"""
+    """連線到 Supabase 並執行『多關鍵字』模糊檢索"""
     try:
-        # 建立資料庫連線
         conn = psycopg2.connect(DB_URL)
         cursor = conn.cursor()
         
-        # 搜尋關鍵字 (使用 ilike 進行模糊比對，不分大小寫)
-        # 注意這裡：已經幫大寫欄位加上了 "雙引號" 避免 PostgreSQL 認錯！
-        sql_query = """
+        # 💡 魔法在這裡：把輸入的字串用「空白」切開
+        # 例如："右手 骨折" -> ["右手", "骨折"]
+        keywords = keyword.split()
+        
+        # 如果使用者沒輸入任何東西，直接回傳空陣列
+        if not keywords:
+            return []
+            
+        # 動態組合 SQL 條件：產生 "JFULL" ilike %s AND "JFULL" ilike %s
+        conditions = " AND ".join(['"JFULL" ilike %s' for _ in keywords])
+        
+        # 準備對應的參數（為每個關鍵字加上 % 符號）
+        params = tuple(f"%{k}%" for k in keywords)
+        
+        sql_query = f"""
             SELECT "JFULL" 
             FROM car_judgments 
-            WHERE "JFULL" ilike %s 
+            WHERE {conditions}
             ORDER BY "JDATE" desc 
             LIMIT 3
         """
-        cursor.execute(sql_query, (f"%{keyword}%",))
+        
+        # 執行 SQL
+        cursor.execute(sql_query, params)
         rows = cursor.fetchall()
         
         cursor.close()
@@ -85,7 +97,6 @@ def search_supabase(keyword):
         
         if rows:
             print(f"✨ 成功從資料庫撈到 {len(rows)} 筆判例！")
-            # 每筆判決書內容截取前 1200 字，確保 Copilot 跑得動
             return [row[0][:1200].replace("\n", " ") for row in rows]
         else:
             return []
@@ -95,5 +106,4 @@ def search_supabase(keyword):
         return []
 
 if __name__ == "__main__":
-    # 本地端測試用
     uvicorn.run(app, host="0.0.0.0", port=8000)
