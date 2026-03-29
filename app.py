@@ -23,7 +23,7 @@ def evaluate(
     print(f"--- 🚀 收到請求 ---")
     print(f"📍 部位: {body_part} | 薪資: {salary} | 月數: {months} | 肇責: {liability}%")
     
-    # 1. 執行 Supabase 資料庫搜尋 (支援多關鍵字斷詞)
+    # 1. 執行 Supabase 資料庫搜尋 (支援多關鍵字斷詞，撈取 5 筆)
     judgments = search_supabase(body_part)
     
     data_source = "Database"
@@ -66,11 +66,9 @@ def search_supabase(keyword):
         conn = psycopg2.connect(DB_URL)
         cursor = conn.cursor()
         
-        # 💡 魔法在這裡：把輸入的字串用「空白」切開
-        # 例如："右手 骨折" -> ["右手", "骨折"]
+        # 將輸入的字串用「空白」切開 (例如："右手 骨折" -> ["右手", "骨折"])
         keywords = keyword.split()
         
-        # 如果使用者沒輸入任何東西，直接回傳空陣列
         if not keywords:
             return []
             
@@ -80,15 +78,15 @@ def search_supabase(keyword):
         # 準備對應的參數（為每個關鍵字加上 % 符號）
         params = tuple(f"%{k}%" for k in keywords)
         
+        # 💡 修改點：LIMIT 5 (撈出 5 筆案件)
         sql_query = f"""
             SELECT "JFULL" 
             FROM car_judgments 
             WHERE {conditions}
             ORDER BY "JDATE" desc 
-            LIMIT 3
+            LIMIT 5
         """
         
-        # 執行 SQL
         cursor.execute(sql_query, params)
         rows = cursor.fetchall()
         
@@ -97,7 +95,8 @@ def search_supabase(keyword):
         
         if rows:
             print(f"✨ 成功從資料庫撈到 {len(rows)} 筆判例！")
-            return [row[0][:1200].replace("\n", " ") for row in rows]
+            # 💡 修改點：將字數限制從 1200 放寬到 3500 字，確保 AI 能讀到判賠金額與理由
+            return [row[0][:3500].replace("\n", " ") for row in rows]
         else:
             return []
             
