@@ -11,17 +11,19 @@ app = FastAPI()
 # ==========================================
 # 🔑 環境變數設定 
 # ==========================================
+# 請確保在 Render 的 Environment Variables 設定了這兩個變數
 DB_URL = os.environ.get("DATABASE_URL")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# 🌟 啟動 Google Gemini 模型大腦
+# 🌟 啟動 Google Gemini 模型
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 # ==========================================
-# ⚖️ 法院認證：正確版霍夫曼計算法模組 (第一年不扣除利息)
+# ⚖️ 法院認證：正確版霍夫曼計算法模組
 # ==========================================
 def get_hoffmann_coefficient(years: int) -> float:
+    """正確版霍夫曼累計係數 (法定年息 5%，第一年不扣除利息)"""
     if years <= 0:
         return 0.0
     coefficient = 0.0
@@ -29,6 +31,7 @@ def get_hoffmann_coefficient(years: int) -> float:
         coefficient += 1.0 / (1 + n * 0.05)
     return round(coefficient, 6)
 
+# 行政院主計總處最新每人月消費支出
 DGBAS_EXPENSES = {
     "基隆市": 24022, "臺北市": 34952, "台北市": 34952, "新北市": 27557,
     "桃園市": 25718, "新竹縣": 30014, "新竹市": 29722, "苗栗縣": 22019,
@@ -41,7 +44,7 @@ DGBAS_EXPENSES = {
 
 @app.get("/")
 def home():
-    return {"status": "Fubon Claims AI Agent is Online! (Dynamic Gemini Pricing)", "message": "Ready to evaluate."}
+    return {"status": "Fubon Claims AI Agent is Online!", "engine": "Gemini 1.5 Pro Latest"}
 
 
 @app.get("/evaluate")
@@ -56,26 +59,20 @@ def evaluate(
     dependents: int = Query(0, description="受扶養人數"),
     city: str = Query("新北市", description="居住縣市")
 ):
-    print(f"--- 🚀 收到請求 ---")
-    print(f"📍 部位: {body_part} | 職業: {job} | 年齡: {age} | 薪資: {salary} | 休養: {months}月")
+    print(f"--- 🚀 啟動理賠評估：{body_part} ---")
     
-    # ==========================================
-    # 1. 執行 Supabase 資料庫搜尋 (RAG)
-    # ==========================================
-    judgments = search_supabase(body_part)
-    data_source = "Hybrid (Supabase + Google Web Search)"
+    # 1. 檢索資料庫判例
+    judgments = search_judgments_in_supabase(body_part)
+    laws = search_laws_in_supabase("慰撫金") 
     
-    # 2. 備援邏輯
-    if not judgments:
-        print("⚠️ 資料庫查無結果，將完全依賴 Gemini 聯網搜尋...")
+    if not laws:
+         laws = ["民法第184條：侵權行為損害賠償責任。", "民法第195條：非財產上損害賠償(慰撫金)。"]
 
-    # ==========================================
-    # 3. 理賠邏輯精算大腦 (明確計算得出的客觀損失)
-    # ==========================================
+    # 2. 客觀損失計算
     work_loss = salary * months
     
     labor_loss_compensation = 0
-    labor_loss_reason = "經初步評估，傷勢未達永久勞動力減損標準，無須額外提列補償現值。"
+    labor_loss_reason = "無"
     if labor_loss_ratio > 0:
         remaining_years = max(0, 65 - age)
         if remaining_years > 0:
@@ -87,152 +84,116 @@ def evaluate(
     dependent_reason = "無"
     if dependents > 0:
         monthly_expense = DGBAS_EXPENSES.get(city, DGBAS_EXPENSES["其他"])
-        support_coef = get_hoffmann_coefficient(10)
+        support_coef = get_hoffmann_coefficient(10) # 預設扶養10年
         dependent_support_compensation = int((monthly_expense * 12) * dependents * support_coef)
-        dependent_reason = f"依主計處標準與霍夫曼係數 {support_coef} 精算現值為 {dependent_support_compensation:,} 元。"
+        dependent_reason = f"依 {city} 標準與霍夫曼係數 {support_coef} 精算現值為 {dependent_support_compensation:,} 元。"
 
-    # ==========================================
-    # 🌟 4. 呼叫 Gemini 進行「動態定價」與報告生成
-    # ==========================================
-    gemini_result = generate_report_with_gemini(
+    # 🌟 3. 呼叫 Gemini 進行動態定價與報告生成
+    gemini_result = generate_dynamic_report(
         age=age, job=job, body_part=body_part, liability=liability, 
         work_loss=work_loss, labor_loss=labor_loss_compensation, 
         dependent_support=dependent_support_compensation, 
-        judgments=judgments
+        judgments=judgments, laws=laws
     )
     
-    # 解析 Gemini 吐出來的 JSON 結果 (取代寫死的 80000)
+    # 從 Gemini 回傳的 JSON 提取數據
     dynamic_consolation = gemini_result.get("estimated_consolation", 80000)
-    tailexi_report = gemini_result.get("report_text", "報告生成失敗。")
+    tailexi_report = gemini_result.get("report_text", "無法生成報告。")
 
-    # ==========================================
-    # 5. 總金額計算與肇責拆算
-    # ==========================================
-    total_estimated = work_loss + dynamic_consolation + labor_loss_compensation + dependent_support_compensation
-    final_amount = int(total_estimated * (liability / 100))
+    # 4. 最終金額加總與肇責折減
+    total_before_liability = work_loss + dynamic_consolation + labor_loss_compensation + dependent_support_compensation
+    final_amount = int(total_before_liability * (liability / 100))
 
-    print(f"✅ 運算完成！Gemini 動態慰撫金: {dynamic_consolation} | 最終總建議金額: {final_amount}")
-
-    # ==========================================
-    # 6. 回傳 JSON 資料包給 Copilot Studio
-    # ==========================================
     return {
         "status": "success",
-        "data_source": data_source,
         "results": {
             "input_job": job,
-            "input_age": age,
             "input_body_part": body_part,
             "calculated_work_loss": work_loss,
             "calculated_labor_loss": labor_loss_compensation,
             "calculated_dependent_support": dependent_support_compensation,
-            "dynamic_consolation": dynamic_consolation, # ✅ 把 Gemini 算出的慰撫金傳給前端
+            "dynamic_consolation": dynamic_consolation,
             "labor_loss_reason": labor_loss_reason,
             "dependent_reason": dependent_reason,
-            "suggested_total_before_liability": total_estimated,
+            "suggested_total_before_liability": total_before_liability,
             "final_suggested_amount": final_amount,
-            "tailexi_style_report": tailexi_report # ✅ 包含完整 Markdown 報告
+            "tailexi_style_report": tailexi_report 
         }
     }
 
-
-def search_supabase(keyword):
-    """連線到 Supabase 並執行『多關鍵字』模糊檢索，加入車禍防呆"""
+# ==========================================
+# 🔍 檢索與生成核心
+# ==========================================
+def search_judgments_in_supabase(keyword):
     try:
         conn = psycopg2.connect(DB_URL)
         cursor = conn.cursor()
-        
         keywords = keyword.split()
-        if not keywords: return []
-            
-        base_conditions = '("JFULL" ilike \'%車禍%\' OR "JFULL" ilike \'%交通事故%\')'
-        keyword_conditions = " AND ".join(['"JFULL" ilike %s' for _ in keywords])
-        params = tuple(f"%{k}%" for k in keywords)
-        
-        sql_query = f"""
-            SELECT "JFULL" 
-            FROM car_judgments 
-            WHERE {base_conditions} AND ({keyword_conditions})
-            ORDER BY "JDATE" desc LIMIT 3
-        """
-        
-        cursor.execute(sql_query, params)
+        base_filter = '("JFULL" ilike \'%車禍%\' OR "JFULL" ilike \'%交通事故%\')'
+        keyword_filter = " AND ".join(['"JFULL" ilike %s' for _ in keywords])
+        sql = f'SELECT "JFULL" FROM car_judgments WHERE {base_filter} AND ({keyword_filter}) ORDER BY "JDATE" desc LIMIT 3'
+        cursor.execute(sql, tuple(f"%{k}%" for k in keywords))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
-        
-        if rows:
-            print(f"✨ 成功從資料庫撈到 {len(rows)} 筆判例！")
-            return [row[0][:3000].replace("\n", " ") for row in rows]
-        return []
-            
-    except Exception as e:
-        print(f"❌ 資料庫搜尋出錯: {str(e)}")
+        return [row[0][:2500].replace("\n", " ") for row in rows] if rows else []
+    except:
         return []
 
-# ==========================================
-# 🤖 Gemini 報告生成模組 (JSON 結構化輸出)
-# ==========================================
-def generate_report_with_gemini(age, job, body_part, liability, work_loss, labor_loss, dependent_support, judgments):
-    """交由 Gemini 綜合推理、查網頁與排版，並嚴格輸出 JSON"""
+def search_laws_in_supabase(keyword):
+    try:
+        conn = psycopg2.connect(DB_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT article_number, article_content FROM laws WHERE article_content ilike %s LIMIT 5", (f"%{keyword}%",))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return [f"{r[0]}：{r[1]}" for r in rows] if rows else []
+    except:
+        return []
+
+def generate_dynamic_report(age, job, body_part, liability, work_loss, labor_loss, dependent_support, judgments, laws):
+    """呼叫最新版 Gemini 進行精確估價與連網分析"""
     if not GEMINI_API_KEY:
-        return {"estimated_consolation": 80000, "report_text": "⚠️ 未設定 GEMINI_API_KEY。"}
+        return {"estimated_consolation": 80000, "report_text": "API Key 缺失"}
         
-    judgments_text = "\n\n".join(judgments) if judgments else "⚠️ 內部資料庫無完全吻合之判例，請連上 Google 搜尋最新實務見解。"
-    other_comp = labor_loss + dependent_support
+    judgments_text = "\n\n".join(judgments) if judgments else "參考網路實務行情。"
+    laws_text = "\n\n".join(laws)
+    other_total = labor_loss + dependent_support
     
     prompt = f"""
-    你現在是一位台灣資深車禍理賠法務。請綜合【本案資訊】、【內部判例】，並「自動連上網路搜尋」最新實務行情，來精確評估「精神慰撫金」的合理金額，並撰寫專業的理賠和解建議書。
+    你現在是台灣資深車禍理賠專家。請針對傷勢「{body_part}」，參考內部判例與 Google 搜尋最新行情，評估最合理的「精神慰撫金」。
+    
+    🚨 指令：
+    1. 嚴禁固定使用 8 萬元。請根據傷勢嚴重度精確估價（如：45,000 或 125,000）。
+    2. 必須回傳「純 JSON」格式（無 Markdown 標籤），包含：
+       - "estimated_consolation": 整數金額
+       - "report_text": 專業分析報告 (Markdown 格式)
+    3. 報告中的最終金額計算必須包含你給出的慰撫金，並乘以肇責比例 {liability}%。
 
-    🚨【AI 慰撫金估價守則】(非常重要)：
-    請務必依據傷勢（{body_part}）的嚴重程度、復原期，以及傷者職業（{job}）動態估算精神慰撫金。
-    參考基準：小擦傷約 1~3 萬；一般骨折約 5~15 萬；嚴重粉碎性骨折或重傷應給予 15 萬~50 萬以上。
-    請綜合你查到的網路判決新聞與內部判例，給出一個你認為最精準的「單一整數金額」。
-
-    請務必回傳純 JSON 格式（不要加上 ```json 標籤），必須包含以下兩個 Key：
-    {{
-        "estimated_consolation": 120000,  // 請填入你評估的最合理精神慰撫金「整數金額」
-        "report_text": "一、工作損失... 二、慰撫金數額之酌定因素... 六、最終建議理賠金額..." // 這是 Markdown 格式的完整報告。報告內的「精神慰撫金」請填寫你剛剛評估的金額；「最終建議理賠金額」請務必將工作損失、勞動力減損、扶養費與精神慰撫金加總後，再乘以肇責比例({liability}%)來精確計算。
-    }}
-
-    【本案資訊】
-    - 傷者年齡：{age} 歲
-    - 職業：{job}
-    - 受傷部位：{body_part}
-    - 肇責比例：我方 {liability}%
-    - 系統已確定之工作損失：{work_loss} 元
-    - 系統已確定之勞動力/扶養費現值：{other_comp} 元
-
-    【內部過往判例】
+    【案情概要】
+    - 年齡：{age} | 職業：{job} | 部位：{body_part}
+    - 工作損失：{work_loss} | 勞力減損與扶養費：{other_total}
+    
+    【法規與判例】
+    {laws_text}
     {judgments_text}
     """
     
     try:
-        print("🧠 正在呼叫 Gemini 生成動態定價與分析報告...")
+        # 🌟 使用最新版本模型名稱
         model = genai.GenerativeModel(
-            model_name='gemini-1.5-pro',
+            model_name='gemini-1.5-pro-latest',
             tools=[{"google_search_retrieval": {}}]
         )
+        response = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.4))
         
-        # 溫度設為 0.4 提供推理彈性，使其估價更貼近真實行情
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.4)
-        )
-        
-        # 清洗可能出現的 Markdown JSON 標籤
-        clean_text = re.sub(r'```json\n?', '', response.text)
-        clean_text = re.sub(r'```\n?', '', clean_text)
-        
-        result_dict = json.loads(clean_text)
-        return result_dict
-        
+        # 移除 JSON 可能夾帶的 Markdown 符號
+        clean_json = re.sub(r'```json\n?|```', '', response.text).strip()
+        return json.loads(clean_json)
     except Exception as e:
-        print(f"❌ Gemini JSON 解析錯誤: {str(e)}")
-        return {
-            "estimated_consolation": 80000, 
-            "report_text": f"報告生成或格式解析失敗。請確認 Gemini 回傳了正確的 JSON 格式。錯誤訊息：{str(e)}"
-        }
+        print(f"Gemini 呼叫失敗: {e}")
+        return {"estimated_consolation": 85000, "report_text": "報告產出異常，請手動校核。"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
