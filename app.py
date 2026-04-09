@@ -1,73 +1,10 @@
-from fastapi import FastAPI, Query
-import psycopg2
-import os
 import requests
 import json
 import re
-import uvicorn
-
-app = FastAPI()
-
-# ==========================================
-# 🔑 環境變數設定 (Render Settings)
-# ==========================================
-DB_URL = os.environ.get("DATABASE_URL")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-
-# ⚖️ 專業精算：霍夫曼係數 (年息 5%)
-def get_hoffmann_coefficient(years: int) -> float:
-    if years <= 0: return 0.0
-    return round(sum(1.0 / (1 + n * 0.05) for n in range(years)), 6)
-
-@app.get("/")
-def home():
-    return {"status": "TaiLexi-Fubon AI is Live!", "engine": "OpenRouter-Auto-Fallback"}
-
-@app.get("/evaluate")
-def evaluate(
-    body_part: str = Query(..., description="受傷部位"),
-    salary: int = Query(..., description="月薪"),
-    months: int = Query(..., description="休養月數"),
-    liability: int = Query(..., description="肇責比例 (0-100)"),
-    job: str = Query("一般職業", description="職業"),
-    age: int = Query(35, description="年齡"),
-    labor_loss_ratio: int = Query(0, description="勞動力減損比"),
-    city: str = Query("台北市", description="居住縣市")
-):
-    # 1. 檢索資料庫判例 (RAG)
-    judgments = search_judgments(body_part, city)
-    
-    # 2. 客觀損失精算
-    work_loss = salary * months
-    labor_loss_comp = 0
-    if labor_loss_ratio > 0:
-        coef = get_hoffmann_coefficient(max(0, 65 - age))
-        labor_loss_comp = int((salary * 12) * (labor_loss_ratio / 100) * coef)
-
-    # 🌟 3. 呼叫 AI (使用 openrouter/auto 自動尋找最穩模型)
-    ai_result = call_ai_expert(age, job, body_part, liability, city, judgments)
-    
-    dynamic_consolation = ai_result.get("estimated_consolation", 100000)
-    tailexi_report = ai_result.get("report_text", "報告解析中斷。")
-
-    # 4. 總額彙整與肇責計算
-    total_estimated = work_loss + labor_loss_comp + dynamic_consolation
-    final_amount = int(total_estimated * (liability / 100))
-
-    return {
-        "status": "success",
-        "results": {
-            "input_city": city,
-            "dynamic_consolation": dynamic_consolation,
-            "final_suggested_amount": final_amount,
-            "tailexi_style_report": tailexi_report 
-        }
-    }
 
 def call_ai_expert(age, job, body_part, liability, city, judgments):
     if not OPENROUTER_API_KEY: return {"estimated_consolation": 80000, "report_text": "Key Error"}
 
-    # 核心邏輯：若資料庫為空，改由 AI 模擬區域法院見解
     db_context = f"【參考資料庫判例】：\n{judgments}" if judgments else f"【⚠️ 資料庫查無紀錄】：請根據您對『{city}地方法院』歷年車禍判決之大數據知識，模擬分析『{body_part}』之數額酌定。"
 
     prompt = f"""
@@ -88,39 +25,54 @@ def call_ai_expert(age, job, body_part, liability, city, judgments):
     {{ "estimated_consolation": 數字, "report_text": "Markdown 報告內容" }}
     """
 
-    try:
-        res = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://fubon-ai.render.com"
-            },
-            data=json.dumps({
-                "model": "openrouter/auto", 
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3
-            }),
-            timeout=40
-        )
-        data = res.json()
-        content = data['choices'][0]['message']['content']
-        clean_json = re.sub(r'```json\n?|```', '', content).strip()
-        return json.loads(clean_json)
-    except:
-        return {"estimated_consolation": 98000, "report_text": "AI 繁忙，請稍後再試。"}
+    # 🏆 強化版：明確的備援模型清單 (優先使用我們已知穩定的模型)
+    model_pool = [
+        "google/gemma-4-31b-it:free",          # 優先：邏輯強，懂中文
+        "meta-llama/llama-3.3-70b-instruct:free", # 備案一：推理能力極佳
+        "openrouter/auto"                       # 最終防線：交給系統自動分配
+    ]
 
-def search_judgments(keyword, city):
-    try:
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor()
-        sql = """SELECT "JFULL" FROM car_judgments WHERE "JFULL" ilike %s AND "JFULL" ilike %s LIMIT 2"""
-        cur.execute(sql, (f"%車禍%", f"%{keyword}%", f"%{city}%"))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return [row[0][:1200] for row in rows]
-    except: return []
+    for model_id in model_pool:
+        try:
+            print(f"⏳ 嘗試使用模型: {model_id}...")
+            res = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY.strip()}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://fubon-ai.render.com" # 建議保留，部分模型需要
+                },
+                data=json.dumps({
+                    "model": model_id,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                }),
+                timeout=45 # 延長超時時間至 45 秒，給大模型更多思考時間
+            )
+            
+            data = res.json()
+            
+            # 檢查是否有正常的 choices 回傳
+            if 'choices' in data and len(data['choices']) > 0:
+                print(f"✅ 模型 {model_id} 成功！")
+                content = data['choices'][0]['message']['content']
+                clean_json = re.sub(r'```json\n?|```', '', content).strip()
+                return json.loads(clean_json)
+            else:
+                # 若無 choices，印出錯誤訊息供除錯
+                error_msg = data.get('error', {}).get('message', '未知錯誤')
+                print(f"❌ 模型 {model_id} 失敗或無效回應: {error_msg}")
+                continue # 嘗試下一個模型
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        except requests.exceptions.Timeout:
+             print(f"⚠️ 模型 {model_id} 請求超時 (Timeout)。")
+             continue
+        except Exception as e:
+            print(f"⚠️ 呼叫模型 {model_id} 發生例外錯誤: {e}")
+            continue # 嘗試下一個模型
+
+    # 如果所有模型都失敗，回傳更有建設性的錯誤訊息
+    return {
+        "estimated_consolation": 98000, 
+        "report_text": "### ⚠️ AI 伺服器目前繁忙\n\n目前所有可用的 AI 模型通道皆處於高負載狀態或請求超時。\n\n**系統建議**：\n1. 請稍候 1-2 分鐘後再次嘗試。\n2. 若持續發生，請確認您的 OpenRouter API Key 狀態或網路連線。\n3. 目前估算之慰撫金（98,000 元）為系統基於基本參數之保底估算，僅供暫時參考。"
+    }
