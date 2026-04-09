@@ -5,8 +5,8 @@ import requests
 import json
 import re
 import uvicorn
+from ddgs import DDGS  # 🌐 載入最新版免費網路爬蟲套件
 
-# 🚨 必須要有這行，伺服器才能啟動
 app = FastAPI()
 
 # ==========================================
@@ -15,12 +15,12 @@ app = FastAPI()
 DB_URL = os.environ.get("DATABASE_URL")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
-# ⚖️ 法院認證：霍夫曼係數計算 (年息 5%)
+# ⚖️ 霍夫曼係數計算 (年息 5%)
 def get_hoffmann_coefficient(years: int) -> float:
     if years <= 0: return 0.0
     return round(sum(1.0 / (1 + n * 0.05) for n in range(years)), 6)
 
-# 🏢 主計處 113 年各縣市平均月消費支出標準 (扶養費計算基準)
+# 🏢 主計處 113 年各縣市平均月消費支出
 DGBAS_EXPENSES = {
     "基隆市": 24022, "臺北市": 34952, "台北市": 34952, "新北市": 27557,
     "桃園市": 25718, "新竹縣": 30014, "新竹市": 29722, "苗栗縣": 22019,
@@ -32,7 +32,7 @@ DGBAS_EXPENSES = {
 
 @app.get("/")
 def home():
-    return {"status": "Fubon Agent is Live", "version": "Final-Ultimate"}
+    return {"status": "Fubon Agent is Live", "version": "Web-Search-Enabled"}
 
 @app.get("/evaluate")
 def evaluate(
@@ -45,12 +45,28 @@ def evaluate(
     labor_loss_ratio: int = Query(0, description="勞力減損比"),
     dependents: int = Query(0, description="受扶養人數"),
     city: str = Query("台北市", description="居住縣市"),
-    medical_fee: int = Query(0, description="醫療費用") # 🆕 新增醫療費用，預設為0
+    medical_fee: int = Query(0, description="醫療費用")
 ):
-    # 1. 搜尋在地資料庫判例
-    judgments = search_judgments(body_part, city)
+    # 1. 優先搜尋內部資料庫
+    db_judgments = search_judgments(body_part, city)
+    context_info = ""
     
-    # 2. 客觀財務損失精算
+    # 🌟 2. 智慧 Fallback：資料庫找不到，啟動 DuckDuckGo 網路爬蟲
+    if db_judgments:
+        context_info = f"【內部資料庫判例】：\n" + "\n".join(db_judgments)
+    else:
+        print(f"⚠️ 資料庫查無 {body_part} 紀錄，觸發聯網搜尋...")
+        # 💡 精煉搜尋關鍵字：去掉冗言贅字，只留最核心的名詞
+        clean_body_part = body_part.replace("併發", " ").replace("造成", " ")
+        search_query = f"車禍 {clean_body_part} 精神慰撫金 判決"
+        web_results = search_web_judgments(search_query)
+        
+        if web_results:
+            context_info = f"【網路即時搜尋判例與法理見解】(內部資料庫無紀錄，啟動聯網輔助)：\n{web_results}"
+        else:
+            context_info = f"【⚠️ 提醒】：內部資料庫與網路搜尋皆無具體紀錄，請根據您對台灣地方法院歷年車禍損害賠償判決之專業知識進行法理模擬分析。"
+
+    # 3. 客觀財務損失精算
     work_loss = salary * months
     
     labor_loss_comp = 0
@@ -60,18 +76,16 @@ def evaluate(
 
     support_comp = 0
     if dependents > 0:
-        # 動態抓取該縣市的生活費標準
         monthly_exp = DGBAS_EXPENSES.get(city, DGBAS_EXPENSES["其他"])
-        # 假設平均扶養年限為 10 年 (實務上依受扶養人年齡而定，此為快速精算模組)
         support_comp = int((monthly_exp * 12) * dependents * get_hoffmann_coefficient(10))
 
-    # 🌟 3. 呼叫「多層級」AI 專家模擬慰撫金與報告
-    ai_result = call_ai_with_fallback(age, job, body_part, liability, city, judgments)
+    # 4. 呼叫「多層級」AI 專家模擬慰撫金與報告
+    ai_result = call_ai_with_fallback(age, job, body_part, liability, city, context_info)
     
     dynamic_consolation = ai_result.get("estimated_consolation", 98000)
     final_report = ai_result.get("report_text", "報告產出失敗。")
 
-    # 4. 總理賠金額計算 (包含醫療費) 與肇責相抵
+    # 5. 總理賠金額計算
     total_before_liability = medical_fee + work_loss + labor_loss_comp + support_comp + dynamic_consolation
     final_amount = int(total_before_liability * (liability / 100))
 
@@ -85,31 +99,47 @@ def evaluate(
     }
 
 # ==========================================
-# 🧠 AI 備援與調度中心 (45秒長時思考版)
+# 🌐 免費網路爬蟲模組 (DuckDuckGo)
 # ==========================================
-def call_ai_with_fallback(age, job, body_part, liability, city, judgments):
+def search_web_judgments(query):
+    try:
+        print(f"🌐 執行爬蟲: {query}")
+        # 使用最新的 ddgs 套件進行搜尋
+        results = DDGS().text(query, region='tw-tz', max_results=3)
+        results_list = list(results)
+        
+        if not results_list: return ""
+        
+        # 將抓到的標題與內文摘要組合起來
+        web_context = "\n".join([f"- {r.get('title', '無標題')}: {r.get('body', '')}" for r in results_list])
+        return web_context
+    except Exception as e:
+        print(f"⚠️ 網路搜尋失敗: {e}")
+        return ""
+
+# ==========================================
+# 🧠 AI 備援與調度中心
+# ==========================================
+def call_ai_with_fallback(age, job, body_part, liability, city, context_info):
     model_list = [
-        "google/gemma-4-31b-it:free",          # 邏輯王
-        "meta-llama/llama-3.3-70b-instruct:free", # 備援一
-        "openrouter/auto"                       # 最終防線
+        "google/gemma-4-31b-it:free",
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "openrouter/auto"
     ]
     
-    db_info = f"【資料庫在地判例】：\n{judgments}" if judgments else f"【⚠️ 提醒】：查無判例，請根據您對『{city}地方法院』歷年判決之專業知識進行模擬分析。"
-
     prompt = f"""
     你現在是台灣富邦產險最資深的理賠法務專家。請產出專業法律建議書。
     地點：{city} | 傷者：{age}歲{job} | 傷勢：{body_part} | 肇責：{liability}%
-    {db_info}
+    {context_info}
     
-    格式：一、關鍵議題 二、適用法條(民法184,193,195) 三、構成要件 四、區域判例分析 五、結論與談判策略。
+    格式：一、關鍵議題 二、適用法條(民法184,193,195) 三、構成要件 四、區域判例分析(請優先引述上方提供之判例或法理資訊) 五、結論與談判策略。
     必須回傳純 JSON：{{"estimated_consolation": 數字, "report_text": "Markdown 報告"}}
     """
 
     for model_id in model_list:
         try:
             print(f"⏳ 嘗試呼叫模型: {model_id}...")
-            if not OPENROUTER_API_KEY:
-                raise ValueError("未設定 OPENROUTER_API_KEY")
+            if not OPENROUTER_API_KEY: raise ValueError("未設定 API KEY")
 
             res = requests.post(
                 url="https://openrouter.ai/api/v1/chat/completions",
@@ -123,32 +153,25 @@ def call_ai_with_fallback(age, job, body_part, liability, city, judgments):
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.3
                 }),
-                timeout=45 # ⏳ 大模型需要時間思考，給足 45 秒
+                timeout=45
             )
             
             data = res.json()
-            
             if 'choices' in data and len(data['choices']) > 0:
-                print(f"✅ 模型 {model_id} 生成成功！")
+                print(f"✅ 模型 {model_id} 成功！")
                 content = data['choices'][0]['message']['content']
                 clean_json = re.sub(r'```json\n?|```', '', content).strip()
                 return json.loads(clean_json)
-            else:
-                print(f"❌ 模型 {model_id} 失敗: {data.get('error', {}).get('message', '未知錯誤')}")
-                continue
-
-        except Exception as e:
-            print(f"⚠️ 呼叫 {model_id} 發生錯誤: {e}")
+        except:
             continue
             
-    # 若全數陣亡，優雅退場
     return {
         "estimated_consolation": 98000, 
-        "report_text": "### ⚠️ AI 伺服器目前繁忙\n\n目前所有 AI 模型通道皆處於高負載狀態。\n\n**系統建議**：\n1. 請稍候 1-2 分鐘後再次嘗試。\n2. 目前估算之慰撫金（98,000元）為系統基於基本參數之保底估算，僅供暫時參考。"
+        "report_text": "### ⚠️ AI 伺服器目前繁忙，請稍候再試。"
     }
 
 # ==========================================
-# 🔍 判例檢索模組
+# 🔍 內部資料庫檢索
 # ==========================================
 def search_judgments(keyword, city):
     try:
