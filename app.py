@@ -158,7 +158,7 @@ def generate_expert_report(age, job, body_part, liability, work_loss, labor_loss
     try:
         # 使用剛才測試成功的模型代號
         model = genai.GenerativeModel(
-            model_name='gemini-3-flash-preview',
+            model_name='gemini-3.1-flash-lite-preview',
             tools=[{"google_search_retrieval": {}}] # 開啟聯網搜尋功能
         )
         response = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.4))
