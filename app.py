@@ -9,7 +9,7 @@ import uvicorn
 app = FastAPI()
 
 # ==========================================
-# 🔑 環境變數設定 (請在 Render 後台設定)
+# 🔑 環境變數設定 (請在Render後台設定)
 # ==========================================
 DB_URL = os.environ.get("DATABASE_URL")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
