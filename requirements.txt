@@ -5,3 +5,4 @@ requests
 gunicorn
 google-generativeai
 ddgs
+python-docx
