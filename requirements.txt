@@ -6,3 +6,4 @@ gunicorn
 google-generativeai
 ddgs
 python-docx
+docxtpl
